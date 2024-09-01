@@ -1,0 +1,328 @@
+##################################################################################
+# Construct the spline basis functions
+#
+# x = a row vector
+# order = order of Ispline being used; k=order+1 is the order of I-spline
+# knots = a sequence of increasing points
+
+Ispline<-function(x,order,knots){
+  k=order+1
+  m=length(knots)
+  n=m-2+k # number of parameters
+  t=c(rep(1,k)*knots[1], knots[2:(m-1)], rep(1,k)*knots[m]) # newknots
+  
+  yy1=array(rep(0,(n+k-1)*length(x)),dim=c(n+k-1, length(x)))
+  for (l in k:n){
+    yy1[l,]=(x>=t[l] & x<t[l+1])/(t[l+1]-t[l])
+  }
+  
+  yytem1=yy1
+  for (ii in 1:order){
+    yytem2=array(rep(0,(n+k-1-ii)*length(x)),dim=c(n+k-1-ii, length(x)))
+    for (i in (k-ii):n){
+      yytem2[i,]=(ii+1)*((x-t[i])*yytem1[i,]+(t[i+ii+1]-x)*yytem1[i+1,])/(t[i+ii+1]-t[i])/ii
+    }
+    yytem1=yytem2
+  }
+  
+  index=rep(0,length(x))
+  for (i in 1:length(x)){
+    index[i]=sum(t<=x[i])
+  }
+  
+  yy=array(rep(0,(n-1)*length(x)),dim=c(n-1,length(x)))
+  
+  if (order==1){
+    for (i in 2:n){
+      yy[i-1,]=(i<index-order+1)+(i==index)*(t[i+order+1]-t[i])*yytem2[i,]/(order+1)
+    }
+  }else{
+    for (j in 1:length(x)){
+      for (i in 2:n){
+        if (i<(index[j]-order+1)){
+          yy[i-1,j]=1
+        }else if ((i<=index[j]) && (i>=(index[j]-order+1))){
+          yy[i-1,j]=(t[(i+order+1):(index[j]+order+1)]-t[i:index[j]])%*%yytem2[i:index[j],j]/(order+1)
+        }else{
+          yy[i-1,j]=0
+        }
+      }
+    }
+  }
+  return(yy)
+}
+
+
+
+##################################################################################
+# Fits the Probit model to current status data measured in pools
+#
+# xt  = time
+# groups = vector length n that identifies which pool each subject belongs
+# g.n = vector of pool sizes
+# n.int = number of interior knots of splines
+# order = order of Ispline being used
+# z  = design matrix
+# upool.id = vector of unique pool ids 
+# Ys =  pool outcome
+# nu = vector of Se vals
+# omega =  vector of Sp vals
+
+probit_GT <- function(xt,groups,g.n,n.int,order,z,upool.id,Ys,nu,omega){
+  set.seed(500)
+  gamma = nu + omega - 1
+  N = dim(z)[1]
+  p = dim(z)[2]
+  x.max <- max(xt)+.00001
+  x.min <- min(xt)-.00001
+  knots <- seq(x.min,x.max,length.out=(n.int+2))
+  bti <- t(Ispline(x=xt,order=order,knots=knots))
+  L = n.int + order 
+  #### order #####
+  z_o <- z[order(groups),]
+  bti_o <- bti[order(groups),]
+  #### Inital
+  betai = rep(0,p)
+  beta_old <- betai
+  g_ini <- rexp(n.int+order, 7)
+  g_old <- g_ini
+  #### Iteration
+  tol = 0.0001
+  max.loops = 12000
+  eoi <- 100
+  iter <- 1
+  ############ judge start ##############
+  while(eoi> tol & iter< max.loops){
+    iter <- iter +1
+    #### E step
+    theta1 = F = E.phi= list()
+    for(j in 1:length(upool.id)){
+      theta1[[j]] <- log(bti[groups==j,]%*%g_old) + z[groups == j,]%*%beta_old
+      F[[j]] = pnorm(theta1[[j]])
+      if(g.n[j]>1){
+        E.phi[[j]] = Ys[j]*nu[j]*F[[j]]/(nu[j]-gamma[j]*prod(1-F[[j]])) + (1-Ys[j])*(1-nu[j])*F[[j]]/(1-nu[j]+gamma[j]*prod(1-F[[j]]))   
+      } else E.phi[[j]] = Ys[j]*nu[j]*F[[j]]/(nu[j]-gamma[j]+gamma[j]*F[[j]]) + (1-Ys[j])*(1-nu[j])*F[[j]]/(1-nu[j]+gamma[j]-gamma[j]*F[[j]])  
+    } 
+    E.phi = unlist(E.phi)     
+    alpha_o = log(bti_o%*%g_old)
+    theta_o = alpha_o + z_o%*%beta_old
+    c1=pnorm(theta_o)
+    c2=pnorm(theta_o)-1
+    tmp1 <- ifelse(c1==0, abs(theta_o+1/theta_o), dnorm(theta_o)/c1)
+    tmp2 <- ifelse(c2==0, abs(theta_o+1/theta_o), dnorm(theta_o)/c2)
+    imy1<- theta_o + tmp1    
+    imy2<- theta_o + tmp2     
+    #### M Step
+    num1 <- t(z_o)%*%as.matrix(E.phi*imy1-E.phi*imy2+imy2-alpha_o)
+    num2 <-solve(t(z_o)%*%z_o)
+    beta_new <- num2%*%num1
+    if(any(is.na(beta_new))) beta_new = betai
+    g_x_old <- log(g_old)
+    g_x_new <- rep(-99,L)
+    D =  bti_o%*%g_old  
+    l=1
+    for(l in 1:L){
+      U = g_old[l]*sum(((bti_o[,l])/D)*(E.phi*imy1-E.phi*imy2+imy2-z_o%*%beta_new - alpha_o))  
+      I.11 = g_old[l]*sum(((bti_o[,l])/D)*(E.phi*imy1-E.phi*imy2+imy2-z_o%*%beta_new - alpha_o))
+      I.12 = -sum((((g_old[l]*bti_o[,l])^2)/(D^2))*(E.phi*imy1-E.phi*imy2+imy2-z_o%*%beta_new - alpha_o))
+      I.2 =  -sum(((g_old[l]*bti_o[,l])/(D))^2)
+      I = (I.11 + I.12) + I.2
+      g_x_new[l] = g_x_old[l] - U/I
+    }
+    g_new = as.vector(exp(g_x_new))
+    if(any(is.nan(g_new))) g_new = g_ini
+    eoi_beta = max(abs(beta_new-beta_old))
+    eoi_g = max(abs(g_new-g_old))
+    eoi <- max(eoi_beta, eoi_g)
+    g_old <- g_new
+    beta_old<-beta_new
+  }
+  g.est <- g_old
+  beta.est = beta_old
+  return(list("beta"=beta.est,"g"=g.est))
+}
+
+
+
+##################################################################################
+#Computes Log-likelihood
+#
+# xt  = time
+# groups = vector length n that identifies which pool each subject belongs
+# g.n = vector of pool sizes
+# n.int = number of interior knots of splines
+# order = order of Ispline being used
+# z  = design matrix
+# upool.id = vector of unique pool ids 
+# Ys =  pool outcome
+# beta = regression coefficients
+# g = spline coefficients
+# nu = vector of Se vals
+# omega =  vector of Sp vals
+
+loglike<-function(xt,groups,g.n,n.int,order,z,upool.id,Ys,beta,g,nu,omega){
+  gamma = nu + omega - 1
+  x.max <- max(xt)+.00001
+  x.min <- min(xt)-.00001
+  knots <- seq(x.min,x.max,length.out=(n.int+2))
+  bti <- t(Ispline(x=xt,order=order,knots=knots))
+  L = n.int + order 
+  theta1 = F = list()
+  S_prod = c()
+  result1 = c()
+  for(j in 1:length(upool.id)){
+    theta1[[j]] <- log(bti[groups==j,]%*%g) + z[groups == j,]%*%beta
+    F[[j]] = pnorm(theta1[[j]])
+    S_prod[j] = prod(1-F[[j]]) 
+    if(g.n[j]>1){
+      result1[j] =  Ys[j]*log(nu[j]-gamma[j]*S_prod[j]) + (1-Ys[j])*log(1-nu[j]+gamma[j]*S_prod[j])  
+    } else result1[j] =  Ys[j]*log(nu[j]-gamma[j]+gamma[j]*F[[j]]) + (1-Ys[j])*log(1-nu[j]+gamma[j]-gamma[j]*F[[j]])   
+  }  
+  result = sum(result1)  
+  return(result)   
+}
+
+
+
+##################################################################################
+# Choose the optimal combination of the order and the number of interior knots by AIC/BIC
+#
+# xt  = time
+# groups = vector length n that identifies which pool each subject belongs
+# g.n = vector of pool sizes
+# knots.seq = the range of the number of interior knots 
+# order.seq = the range of the order of Ispline being used
+# z  = design matrix
+# upool.id = vector of unique pool ids 
+# Ys =  pool outcome
+# nu = vector of Se vals
+# omega =  vector of Sp vals
+
+knots_order <- function(xt,groups,g.n,knots.seq,order.seq,z,upool.id,Ys,nu,omega){
+  gamma = nu + omega - 1
+  p = dim(z)[2]
+  M1 = 10^7
+  M2 = 10^7
+  n.knots <- length(knots.seq)
+  n.order <- length(order.seq)
+  AIC = matrix(1,n.order,n.knots)
+  BIC = matrix(1,n.order,n.knots)
+  for (i in 1:n.order) {
+    s.order <- order.seq[i]
+    for (j in 1:n.knots) {
+      s.knot <- knots.seq[j]   
+      outcome <- probit_GT(xt=xt,groups=groups,g.n=g.n,n.int=s.knot,order=s.order,z=z,upool.id=upool.id,Ys=Y,nu=nu,omega=omega)
+      loglikehood = loglike(xt=xt,groups=groups,g.n=g.n,n.int=s.knot,order=s.order,z=z,upool.id=upool.id,
+                            Ys=Y,beta=outcome$beta,g=outcome$g,nu=nu,omega=omega)
+      AIC[i,j] = -2*loglikehood + 2*(p+s.order+s.knot)
+      BIC[i,j] = -2*loglikehood + (p+s.order+s.knot)*log(length(upool.id))
+      if(AIC[i,j]< M1){
+        M1 = AIC[i,j]
+        c.order.AIC = s.order
+        c.knot.AIC = s.knot
+      }
+      if(BIC[i,j]< M2){
+        M2 = BIC[i,j]
+        c.order.BIC = s.order
+        c.knot.BIC = s.knot
+      }
+    }
+  }
+  return(list("order_A"=c.order.AIC,"knot_A"=c.knot.AIC,"order_B"=c.order.BIC,"knot_B"=c.knot.BIC))
+}
+
+
+
+##################################################################################
+# Profile likelihood method to get SE estimates
+#
+# xt  = time
+# groups = vector length n that identifies which pool each subject belongs
+# g.n = vector of pool sizes
+# n.int = number of interior knots of splines
+# order = order of splines
+# z  = design matrix
+# upool.id = vector of unique pool ids 
+# Ys =  pool outcome
+# be = the estimates of beta obtained by using the proposed method
+# g.est = the estimates of spline coefficients obtained by using the proposed method
+# nu = vector of Se vals
+# omega =  vector of Sp vals
+
+prolik <- function(xt,groups,g.n,n.int,order,z,upool.id,Ys,be,g.est,nu,omega){
+  gamma = nu + omega - 1
+  N = dim(z)[1]
+  p = dim(z)[2]
+  x.max <- max(xt)+.00001
+  x.min <- min(xt)-.00001
+  knots <- seq(x.min,x.max,length.out=(n.int+2))
+  bti <- t(Ispline(x=xt,order=order,knots=knots))
+  L = n.int + order 
+  #### order #####
+  z_o <- z[order(groups),]
+  bti_o <- bti[order(groups),]
+  ####### initial ######
+  ga.ini <- g.est
+  ga.hat = ga.ini
+  tol = 0.0001
+  max.loops = 12000
+  iter = 1
+  eoi_g = 100
+  while(eoi_g >= tol && iter < max.loops){
+    ############   E-Step and M-Step ################ 
+    iter <- iter +1
+    #### E step 
+    theta1 = F = E.phi= list()
+    for(j in 1:length(upool.id)){
+      theta1[[j]] <- log(bti[groups==j,]%*%ga.hat) + z[groups == j,]%*%be
+      F[[j]] = pnorm(theta1[[j]])
+      if(g.n[j]>1){
+        E.phi[[j]] = Ys[j]*nu[j]*F[[j]]/(nu[j]-gamma[j]*prod(1-F[[j]])) + (1-Ys[j])*(1-nu[j])*F[[j]]/(1-nu[j]+gamma[j]*prod(1-F[[j]]))   
+      } else E.phi[[j]] = Ys[j]*nu[j]*F[[j]]/(nu[j]-gamma[j]+gamma[j]*F[[j]]) + (1-Ys[j])*(1-nu[j])*F[[j]]/(1-nu[j]+gamma[j]-gamma[j]*F[[j]])   
+    } 
+    E.phi = unlist(E.phi) 
+    alpha_o = log(bti_o%*%ga.hat)
+    theta_o = alpha_o + z_o%*%be
+    c1=pnorm(theta_o)
+    c2=pnorm(theta_o)-1
+    tmp1 <- ifelse(c1==0, abs(theta_o+1/theta_o), dnorm(theta_o)/c1)
+    tmp2 <- ifelse(c2==0, abs(theta_o+1/theta_o), dnorm(theta_o)/c2)
+    imy1<- theta_o + tmp1    
+    imy2<- theta_o + tmp2    
+    #### M Step
+    g_x_old <- log(ga.hat)
+    g_x_new <- rep(-99,L)
+    D =  bti_o%*%ga.hat  
+    l=1
+    for(l in 1:L){
+      U = ga.hat[l]*sum(((bti_o[,l])/D)*(E.phi*imy1-E.phi*imy2+imy2-z_o%*%be - alpha_o))  
+      I.11 = ga.hat[l]*sum(((bti_o[,l])/D)*(E.phi*imy1-E.phi*imy2+imy2-z_o%*%be - alpha_o))
+      I.12 = -sum((((ga.hat[l]*bti_o[,l])^2)/(D^2))*(E.phi*imy1-E.phi*imy2+imy2-z_o%*%be - alpha_o))
+      I.2 =  -sum(((ga.hat[l]*bti_o[,l])/(D))^2)
+      I = (I.11 + I.12) + I.2  
+      g_x_new[l] = g_x_old[l] - U/I
+    }
+    g_new = as.vector(exp(g_x_new))
+    if(any(is.nan(g_new))) g_new = ga.ini
+    eoi_g = max(abs(g_new-ga.hat))
+    ga.hat <- g_new
+  }
+  theta1 = F = list()
+  S_prod = c()
+  result = c()
+  for(j in 1:length(upool.id)){
+    theta1[[j]] <- log(bti[groups==j,]%*%ga.hat) + z[groups == j,]%*%be
+    F[[j]] = pnorm(theta1[[j]])
+    S_prod[j] = prod(1-F[[j]])
+    if(g.n[j]>1){
+      result[j] =  Ys[j]*log(nu[j]-gamma[i]*S_prod[j]) + (1-Ys[j])*log(1-nu[j]+gamma[j]*S_prod[j])  
+    } else result[j] =  Ys[j]*log(nu[j]-gamma[j]+gamma[j]*F[[j]]) + (1-Ys[j])*log(1-nu[j]+gamma[j]-gamma[j]*F[[j]]) 
+  } 
+  return(result)   
+}
+
+
+
+
+
+

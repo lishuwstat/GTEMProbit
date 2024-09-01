@@ -1,0 +1,95 @@
+##############################################################
+# Set working directory and read in the data 
+data<-read.csv(file="Data.csv",header=TRUE)
+
+##################################
+# Required packages
+library(gtools)
+library(doParallel)
+library(doRNG)
+
+#################################################
+# Read in code that executes the proposed method
+source("Support functions.txt")
+
+#################################################
+# Structure the data
+xt<-data[,4]
+z<-as.matrix(data[,c(5,6)])
+groups<-data[,2]
+upool.id<-unique(groups)
+
+Y<-NULL
+g.n<-NULL
+i=2
+for(i in 1:length(upool.id)){
+  id<-which(groups==upool.id[i])
+  Y<-c(Y,max(data[id,3]))             # Identifies the pool test outcome
+  g.n<-c(g.n,length(id))              # Identifies the pool size
+}
+
+#################################################
+# Specify the sensitivity and specificity
+nu = rep(0.95,length(Y))
+omega = rep(0.98,length(Y))
+
+###########################################################
+# Specify the range of the number of interior knots and the choices of Ispline's order
+knots.seq <- 5:20
+order.seq <- c(1,2)
+
+###########################################################
+# Specify the perturbation parameter used in the profile likelihood approach
+h = 5*(length(upool.id))^(-0.5)
+
+###########################################################
+# Select the optimal combination of the order and number of interior knots by AIC and BIC
+res <- knots_order(xt=xt,groups=groups,g.n=g.n,knots.seq=knots.seq,order.seq=order.seq,
+                   z=z,upool.id=upool.id,Ys=Y,nu=nu,omega=omega)  
+
+# Fit the optimal model using the number of interior knots and order selected by AIC
+res2A <- probit_GT(xt=xt,groups=groups,g.n=g.n,n.int=res$knot_A,order=res$order_A,
+                  z=z,upool.id=upool.id,Ys=Y,nu=nu,omega=omega)
+
+# Fit the optimal model using the number of interior knots and order selected by BIC
+res2B <- probit_GT(xt=xt,groups=groups,g.n=g.n,n.int=res$knot_B,order=res$order_B,
+                  z=z,upool.id=upool.id,Ys=Y,nu=nu,omega=omega)
+
+#####################################################################
+# Estimate the standard errors via the proposed profile likelihood approach
+p=dim(z)[2]
+E = h * diag(rep(1,p))  
+Me.AIC = matrix(0, p, length(upool.id))
+Me.BIC = matrix(0, p, length(upool.id))
+for (i in 1:p){                
+  betaEi1.AIC = res2A$beta + E[,i]       
+  betaEi2.AIC = res2A$beta - E[,i]      
+  pl1.AIC = prolik(xt=xt,groups=groups,g.n=g.n,n.int=res$knot_A,order=res$order_A,z=z,
+                   upool.id=upool.id,Ys=Y,be=betaEi1.AIC,g.est=res2A$g,nu=nu,omega=omega) 
+  pl2.AIC = prolik(xt=xt,groups=groups,g.n=g.n,n.int=res$knot_A,order=res$order_A,z=z,
+                   upool.id=upool.id,Ys=Y,be=betaEi2.AIC,g.est=res2A$g,nu=nu,omega=omega) 
+  Me.AIC[i,] = (pl1.AIC-pl2.AIC)/(2*h)
+  
+  betaEi1.BIC = res2B$beta + E[,i]       
+  betaEi2.BIC = res2B$beta - E[,i]
+  pl1.BIC = prolik(xt=xt,groups=groups,g.n=g.n,n.int=res$knot_B,order=res$order_B,z=z,
+                   upool.id=upool.id,Ys=Y,be=betaEi1.BIC,g.est=res2B$g,nu=nu,omega=omega) 
+  pl2.BIC = prolik(xt=xt,groups=groups,g.n=g.n,n.int=res$knot_B,order=res$order_B,z=z,
+                   upool.id=upool.id,Ys=Y,be=betaEi2.BIC,g.est=res2B$g,nu=nu,omega=omega)
+  Me.BIC[i,] = (pl1.BIC-pl2.BIC)/(2*h) 
+}                                    
+I.AIC = Me.AIC%*%t(Me.AIC)
+I.BIC = Me.BIC%*%t(Me.BIC)  
+
+sd.beta.AIC = sqrt(diag(solve(I.AIC)))
+p.value.AIC = 2*(1 - pnorm(abs(res2A$beta), 0, sd.beta.AIC))
+
+sd.beta.BIC = sqrt(diag(solve(I.BIC)))
+p.value.BIC = 2*(1 - pnorm(abs(res2B$beta), 0, sd.beta.BIC))
+
+#######################################################################################
+# Provide point estimate, standard error estimate, and p-value for covariate effects
+round(cbind(res2A$beta,sd.beta.AIC,p.value.AIC),3)   #result under AIC
+round(cbind(res2B$beta,sd.beta.BIC,p.value.BIC),3)   #result under AIC
+
+
